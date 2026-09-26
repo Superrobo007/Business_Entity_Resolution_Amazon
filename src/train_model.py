@@ -10,6 +10,7 @@ learn to reject to keep precision high under F_0.5).
 
 import lightgbm as lgb
 import numpy as np
+import pandas as pd
 from sklearn.model_selection import GroupKFold
 
 from features import FEATURE_NAMES, build_feature_matrix
@@ -23,17 +24,29 @@ def build_training_table(candidates: dict, gt_exploded, s1_lookup: dict, other_l
                  true positive pairs (from io_utils.explode_ground_truth).
     Returns: X (features), y (labels), groups (source1_entity_id, for
              group-aware CV so a whole S1 entity's pairs stay together).
+
+    Label assignment uses a pandas merge (hash join) against the ground
+    truth instead of a Python "(s1, cand) in true_pairs" set-membership
+    check inside a nested for-loop. At ~140M+ candidate pairs, the old
+    loop cost real minutes; a merge does the equivalent join in C.
     """
-    import pandas as pd
-
-    true_pairs = set(zip(gt_exploded["source1_entity_id"], gt_exploded["matched_entity_id"]))
-
-    rows = []
+    s1_list = []
+    cand_list = []
     for s1, cands in candidates.items():
-        for cand in cands:
-            label = 1 if (s1, cand) in true_pairs else 0
-            rows.append((s1, cand, label))
-    pairs_df = pd.DataFrame(rows, columns=["source1_entity_id", "candidate_entity_id", "label"])
+        cands = list(cands)
+        s1_list.extend([s1] * len(cands))
+        cand_list.extend(cands)
+    pairs_df = pd.DataFrame({"source1_entity_id": s1_list, "candidate_entity_id": cand_list})
+
+    gt_pos = gt_exploded.rename(columns={"matched_entity_id": "candidate_entity_id"}).copy()
+    gt_pos["label"] = 1
+
+    pairs_df = pairs_df.merge(
+        gt_pos[["source1_entity_id", "candidate_entity_id", "label"]],
+        on=["source1_entity_id", "candidate_entity_id"],
+        how="left",
+    )
+    pairs_df["label"] = pairs_df["label"].fillna(0).astype(int)
 
     X = build_feature_matrix(pairs_df, s1_lookup, other_lookup)
     y = pairs_df["label"].values
@@ -56,9 +69,6 @@ def train_lightgbm(X, y, groups, n_splits: int = 5, params: dict = None):
         min_child_samples=10,
         subsample=0.8,
         colsample_bytree=0.8,
-        # Positives (true matches) are rare relative to look-alike
-        # candidates; weight them up so the model doesn't just predict
-        # "no match" everywhere.
         is_unbalance=True,
         random_state=42,
     )
@@ -92,7 +102,6 @@ def predict_with_ensemble(models, X):
 
 
 def feature_importance_report(models):
-    import pandas as pd
     imp = np.mean([m.feature_importances_ for m in models], axis=0)
     return pd.DataFrame({"feature": FEATURE_NAMES, "importance": imp}).sort_values(
         "importance", ascending=False

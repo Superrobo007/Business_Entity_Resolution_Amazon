@@ -15,8 +15,8 @@ import numpy as np
 import pandas as pd
 
 from io_utils import load_source, write_pairs_tsv
-from normalize import add_normalized_columns
-from blocking import build_candidates
+from normalize_parallel import add_normalized_columns_parallel as add_normalized_columns
+from blocking import build_candidates, candidates_to_frame
 from features import build_feature_matrix, frame_to_lookup
 from train_model import predict_with_ensemble
 
@@ -52,14 +52,10 @@ def run_test_pipeline(
     )
 
     # --- Score every candidate with the trained ensemble ----------------
-    rows = []
-    for s1_id, cands in candidates.items():
-        for c in cands:
-            rows.append((s1_id, c))
-    pairs_df = pd.DataFrame(rows, columns=["source1_entity_id", "candidate_entity_id"])
+    pairs_df = candidates_to_frame(candidates, s1_ids)
+    pairs_df = pairs_df.rename(columns={"candidate_entity_id": "candidate_entity_id"})
 
     if len(pairs_df) == 0:
-        # No candidates at all (shouldn't normally happen) -> all singletons
         write_pairs_tsv({}, s1_ids, os.path.join(output_dir, "matching_results.tsv"),
                          id_col="matched_entity_ids")
         return
@@ -69,8 +65,8 @@ def run_test_pipeline(
     X = build_feature_matrix(pairs_df, s1_lookup, other_lookup)
     pairs_df["prob"] = predict_with_ensemble(models, X)
 
-    # --- Apply the tuned threshold, keep only IDs that exist in the test set,
-    #     final matches are a strict subset of candidates by construction ---
+    # --- Apply the tuned threshold; final matches are a strict subset of
+    #     candidates by construction ------------------------------------
     matches = {}
     for s1_id, group in pairs_df.groupby("source1_entity_id"):
         kept = group.loc[group["prob"] >= best_threshold, "candidate_entity_id"].tolist()

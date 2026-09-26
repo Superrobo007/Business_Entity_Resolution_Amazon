@@ -17,7 +17,6 @@ def load_source(path: str) -> pd.DataFrame:
     missing = [c for c in REQUIRED_SOURCE_COLS if c not in df.columns]
     if missing:
         raise ValueError(f"{path} is missing expected columns: {missing}. Found: {list(df.columns)}")
-    # Normalize whitespace-only fields to real empty strings
     for c in ["business_name", "business_address", "country"]:
         df[c] = df[c].fillna("").astype(str).str.strip()
     return df.reset_index(drop=True)
@@ -39,17 +38,21 @@ def explode_ground_truth(gt: pd.DataFrame) -> pd.DataFrame:
     Turn the one-row-per-S1-entity ground truth into a long table of
     (source1_entity_id, matched_id) positive pairs. Rows with an empty
     matched_entity_ids (singletons) produce no rows here.
+
+    Vectorized via pandas .str.split + .explode instead of
+    .iterrows() + Python string splitting — the iterrows() version
+    takes tens of seconds to over a minute at ~2M+ rows; this version
+    runs in roughly a second, same output.
     """
-    rows = []
-    for _, r in gt.iterrows():
-        s1 = r["source1_entity_id"]
-        ids = r["matched_entity_ids"]
-        if ids:
-            for mid in ids.split(","):
-                mid = mid.strip()
-                if mid:
-                    rows.append((s1, mid))
-    return pd.DataFrame(rows, columns=["source1_entity_id", "matched_entity_id"])
+    non_empty = gt[gt["matched_entity_ids"] != ""].copy()
+    if len(non_empty) == 0:
+        return pd.DataFrame(columns=["source1_entity_id", "matched_entity_id"])
+
+    non_empty["matched_entity_id"] = non_empty["matched_entity_ids"].str.split(",")
+    long_df = non_empty.explode("matched_entity_id")
+    long_df["matched_entity_id"] = long_df["matched_entity_id"].str.strip()
+    long_df = long_df[long_df["matched_entity_id"] != ""]
+    return long_df[["source1_entity_id", "matched_entity_id"]].reset_index(drop=True)
 
 
 def write_pairs_tsv(pairs_by_s1: dict, s1_ids: list, out_path: str, id_col: str) -> None:
@@ -57,18 +60,21 @@ def write_pairs_tsv(pairs_by_s1: dict, s1_ids: list, out_path: str, id_col: str)
     Write a TSV in the required output format: one row per Source 1 entity,
     even if it has no matches/candidates (empty string, no quoting).
     `pairs_by_s1` maps source1_entity_id -> list of matched/candidate ids.
-    `s1_ids` is the full list of Source 1 entity ids that MUST all appear
-    (this guarantees every test entity is present, per the spec).
+    `s1_ids` is the full list of Source 1 entity ids that MUST all appear.
+
+    Builds all lines in memory and writes once with writelines(), rather
+    than one f.write() call per row — a minor but free speedup at
+    millions of rows (fewer individual I/O calls).
     """
+    lines = [f"source1_entity_id\t{id_col}\n"]
+    for s1 in s1_ids:
+        ids = pairs_by_s1.get(s1, [])
+        seen = set()
+        deduped = []
+        for i in ids:
+            if i not in seen:
+                seen.add(i)
+                deduped.append(i)
+        lines.append(f"{s1}\t{','.join(deduped)}\n")
     with open(out_path, "w", encoding="utf-8") as f:
-        f.write(f"source1_entity_id\t{id_col}\n")
-        for s1 in s1_ids:
-            ids = pairs_by_s1.get(s1, [])
-            # de-duplicate while preserving order
-            seen = set()
-            deduped = []
-            for i in ids:
-                if i not in seen:
-                    seen.add(i)
-                    deduped.append(i)
-            f.write(f"{s1}\t{','.join(deduped)}\n")
+        f.writelines(lines)
