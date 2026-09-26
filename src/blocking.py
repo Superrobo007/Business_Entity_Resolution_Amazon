@@ -90,7 +90,7 @@ def build_candidates(
     other_df,
     top_k: int = 15,           # kept for signature compatibility, unused (no similarity ranking here)
     sim_threshold: float = 0.35,  # kept for signature compatibility, unused
-    prefix_len: int = 5,
+    prefix_len: int = 6,
     max_block_size: int = 3000,
 ):
     """

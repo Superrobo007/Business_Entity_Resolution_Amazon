@@ -120,9 +120,13 @@ def extract_numeric_tokens(text: str) -> set:
 def add_normalized_columns(df, name_col="business_name", addr_col="business_address"):
     """Attach normalized_name, name_sorted, normalized_address, address_numbers columns."""
     df = df.copy()
-    df["normalized_name"] = df[name_col].apply(normalize_name)
-    df["name_sorted"] = df[name_col].apply(name_tokens_sorted)
-    df["normalized_address"] = df[addr_col].apply(normalize_address)
-    df["address_numbers"] = df[addr_col].apply(extract_numeric_tokens)
-    df["landmark"] = df[addr_col].apply(extract_landmark)
+    # Vectorized operations are faster than apply for large datasets
+    names = df[name_col].values
+    addrs = df[addr_col].values
+    
+    df["normalized_name"] = [normalize_name(n) for n in names]
+    df["name_sorted"] = [name_tokens_sorted(n) for n in names]
+    df["normalized_address"] = [normalize_address(a) for a in addrs]
+    df["address_numbers"] = [extract_numeric_tokens(a) for a in addrs]
+    df["landmark"] = [extract_landmark(a) for a in addrs]
     return df
